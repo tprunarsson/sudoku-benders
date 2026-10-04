@@ -1,0 +1,17 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+runs/
+*.lic
+.env
+.env.*
+*wls*.txt
+tex/*.aux
+tex/*.log
+tex/*.out
+tex/*.dvi
+tex/*.synctex.gz
+*.tmp

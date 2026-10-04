@@ -1,0 +1,67 @@
+gurobipy (14, 0, 0) | macOS-27.0-arm64-arm-64bit-Mach-O | python 3.14.7
+Set parameter OutputFlag to value 1
+Set parameter LazyConstraints to value 1
+Set parameter MIPGap to value 0
+Set parameter TimeLimit to value 120
+Gurobi Optimizer version 14.0.0beta build v14.0.0beta1 (mac64[arm] - Darwin 27.0.0 26A428)
+
+CPU model: Apple M4 Max
+Thread count: 14 physical cores, 14 logical processors, using up to 14 threads
+
+Non-default parameters:
+TimeLimit  120
+MIPGap  0
+LazyConstraints  1
+
+Academic license 892102 - for non-commercial use only - registered to tp___@hi.is
+Optimize a model with 1053 rows, 1458 columns and 4374 nonzeros (Min)
+Model fingerprint: 0x79572300
+Model has 729 linear objective coefficients
+Variable types: 0 continuous, 1458 integer (1458 binary)
+Coefficient statistics:
+  Matrix range     [1e+00, 1e+00]
+  Objective range  [1e+00, 1e+00]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+00]
+
+Presolve removed 225 rows and 369 columns
+Presolve time: 0.00s
+Presolved: 828 rows, 1089 columns, 3240 nonzeros
+Variable types: 0 continuous, 1089 integer (1089 binary)
+
+Root relaxation: objective 0.000000e+00, 395 iterations, 0.01 seconds (0.01 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+     0     0    0.00000    0    -          -    0.00000      -     -    0s
+     0     0    0.00000    0  146          -    0.00000      -     -    0s
+     0     0    0.00000    0    -          -    0.00000      -     -    0s
+     0     0    0.00000    0    8          -    0.00000      -     -    0s
+     0     0    0.00000    0    8          -    0.00000      -     -    0s
+     0     0    0.00000    0   74          -    0.00000      -     -    0s
+     0     0    0.00000    0   51          -    0.00000      -     -    0s
+     0     0    0.00000    0    -          -    0.00000      -     -    0s
+     0     0    0.00000    0   99          -    0.00000      -     -    0s
+     0     0    0.00000    0   99          -    0.00000      -     -    0s
+     0     0    0.00000    0    -          -    0.00000      -     -    0s
+     0     0    0.00000    0   27          -    0.00000      -     -    0s
+     0     2    0.00000    0    8          -    0.00000      -     -    0s
+* 1543   998              46       0.0000000    0.00000  0.00%  53.3    4s
+
+Explored 1886 nodes (95833 simplex iterations) in 4.04 seconds (0.90 work units)
+Thread count was 14 (of 14 available processors)
+
+Solution count 1: 0 
+
+Optimal solution found (tolerance 0.00e+00)
+Best objective 0.000000000000e+00, best bound 0.000000000000e+00, gap 0.0000%
+
+User-callback calls 4494, time in user-callback 3.34 sec
+
+status=2 (OPTIMAL=2)  SolCount=1  ObjVal=0.0  ObjBound=0.0
+MIPSOL callbacks=430  lazy cuts added=1720
+final incumbent was cut off in MIPSOL before: True
+final incumbent violates 8 of 1720 lazy cuts, max violation 1
+
+REPRODUCED: accepted incumbent violates lazy constraints.

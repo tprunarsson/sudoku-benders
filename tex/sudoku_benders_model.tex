@@ -1,0 +1,681 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\definecolor{navy}{RGB}{28,54,87}
+\definecolor{softgray}{RGB}{245,247,249}
+\hypersetup{colorlinks=true,linkcolor=navy,urlcolor=navy}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\setlist[itemize]{topsep=0.25em,itemsep=0.2em}
+\setlist[enumerate]{topsep=0.25em,itemsep=0.2em}
+
+\newcommand{\clue}{x}
+\newcommand{\target}{y}
+\newcommand{\alt}{z}
+\newcommand{\Sud}{\mathcal{S}}
+
+\title{Generating a Minimum-Clue Sudoku with Logic-Based Benders Decomposition}
+\author{Technical model note and implementation guide}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note develops a mixed-integer programming model that generates both a completed Sudoku and the clues shown to a player. The objective is to minimize the number of clues while requiring that the displayed puzzle have exactly one completion. Uniqueness is enforced by a logic-based Benders decomposition: the master problem proposes a target Sudoku and a clue set, while a subproblem searches for a different valid Sudoku satisfying those clues. Whenever such an alternative is found, a conditional Benders cut is added. The cut does not ban the alternative Sudoku from ever becoming a target; instead it says that if the target is different from that Sudoku, at least one revealed clue must rule it out. This distinction is essential when the target Sudoku itself is a decision variable.
+\end{abstract}
+
+\section{Problem statement}
+
+We want the optimization model to do two things simultaneously:
+\begin{enumerate}
+    \item generate a valid completed Sudoku, which will be the intended solution; and
+    \item select as few entries of that solution as possible to reveal as clues.
+\end{enumerate}
+The revealed clues must determine the generated solution uniquely.
+
+For an $N\times N$ Sudoku, let
+\[
+I=J=K=\{1,\ldots,N\},
+\]
+where $i$ is a row, $j$ is a column, and $k$ is a digit. For the standard puzzle $N=9$ and the boxes are $3\times3$; for the small test problem $N=4$ and the boxes are $2\times2$.
+
+Let $\mathcal{B}$ denote the set of boxes and let $B\subseteq I\times J$ denote the cells in a box.
+
+\section{Master variables}
+
+The master problem contains two main binary variable families:
+\[
+\target_{ijk}=
+\begin{cases}
+1,&\text{if the generated target Sudoku places digit $k$ in cell $(i,j)$},\\
+0,&\text{otherwise,}
+\end{cases}
+\]
+and
+\[
+\clue_{ijk}=
+\begin{cases}
+1,&\text{if digit $k$ is actually shown as a clue in cell $(i,j)$},\\
+0,&\text{otherwise.}
+\end{cases}
+\]
+
+The objective is simply
+\begin{equation}
+\min \sum_{i\in I}\sum_{j\in J}\sum_{k\in K} \clue_{ijk}.
+\label{eq:objective}
+\end{equation}
+
+\textbf{Plain-language meaning.} Every selected $x$ is one visible clue, so the objective asks the model to make the puzzle as sparse as possible.
+
+\section{Sudoku constraints in the master}
+
+\subsection{One digit in every cell}
+
+\begin{equation}
+\sum_{k\in K}\target_{ijk}=1
+\qquad \forall i\in I,\;j\in J.
+\label{eq:cell}
+\end{equation}
+
+\textbf{Plain-language meaning.} Every square of the completed answer key must contain exactly one number.
+
+\subsection{Each digit once in every row}
+
+\begin{equation}
+\sum_{j\in J}\target_{ijk}=1
+\qquad \forall i\in I,\;k\in K.
+\label{eq:row}
+\end{equation}
+
+\textbf{Plain-language meaning.} In each row, every digit appears exactly once.
+
+\subsection{Each digit once in every column}
+
+\begin{equation}
+\sum_{i\in I}\target_{ijk}=1
+\qquad \forall j\in J,\;k\in K.
+\label{eq:column}
+\end{equation}
+
+\textbf{Plain-language meaning.} In each column, every digit appears exactly once.
+
+\subsection{Each digit once in every box}
+
+\begin{equation}
+\sum_{(i,j)\in B}\target_{ijk}=1
+\qquad \forall B\in\mathcal{B},\;k\in K.
+\label{eq:box}
+\end{equation}
+
+\textbf{Plain-language meaning.} Every sub-box also contains each digit exactly once.
+
+\subsection{A clue must agree with the generated target}
+
+\begin{equation}
+\clue_{ijk}\le \target_{ijk}
+\qquad \forall i,j,k.
+\label{eq:clue-link}
+\end{equation}
+
+\textbf{Plain-language meaning.} The model is not allowed to print a clue that disagrees with its own answer key. If the generated answer has a 7 in a cell, the only clue that can be shown in that cell is 7.
+
+Because equation~\eqref{eq:cell} permits only one target digit per cell, equation~\eqref{eq:clue-link} also implies that at most one clue can be selected in each cell.
+
+\section{Why uniqueness is the difficult part}
+
+Constraints~\eqref{eq:cell}--\eqref{eq:clue-link} generate a valid answer key and a subset of its entries. They do \emph{not} guarantee that a player sees enough information to recover that answer uniquely.
+
+Given a candidate pair $(\bar x,\bar y)$, uniqueness means:
+\begin{quote}
+There must not exist another complete Sudoku $z\neq \bar y$ that agrees with every clue in $\bar x$.
+\end{quote}
+
+Writing that requirement directly in a compact MIP is awkward because it is a statement about the \emph{nonexistence} of another integer solution. This is the role of the Benders subproblem.
+
+\section{The uniqueness subproblem}
+
+For a fixed master solution $(\bar x,\bar y)$, introduce binary variables
+\[
+\alt_{ijk}=1
+\quad\Longleftrightarrow\quad
+\text{the candidate alternative solution puts digit $k$ in cell $(i,j)$.}
+\]
+
+The $z$ variables satisfy the same four families of Sudoku constraints as $y$.
+
+\subsection{The alternative must respect all selected clues}
+
+\begin{equation}
+\alt_{ijk}\ge \bar x_{ijk}
+\qquad \forall i,j,k.
+\label{eq:respect-clues}
+\end{equation}
+
+\textbf{Plain-language meaning.} If the master printed a digit as a clue, the alternative solution must contain that digit in that cell. Blank cells remain unrestricted.
+
+Let $\bar k_{ij}$ be the digit selected by the current target $\bar y$ in cell $(i,j)$. To stop the subproblem from simply returning the target itself, impose
+\begin{equation}
+\sum_{i\in I}\sum_{j\in J}\alt_{ij,\bar k_{ij}}
+\le N^2-1.
+\label{eq:not-target}
+\end{equation}
+
+\textbf{Plain-language meaning.} A complete Sudoku agrees with the target in all $N^2$ cells only when it \emph{is} the target. Equation~\eqref{eq:not-target} forces the subproblem to disagree in at least one cell.
+
+The basic subproblem can therefore have the feasibility objective
+\[
+\min 0.
+\]
+If it is infeasible, no second completion exists and the puzzle is unique.
+
+A useful strengthening is to search for the alternative closest to the current target:
+\begin{equation}
+\max \sum_{i,j}\alt_{ij,\bar k_{ij}}.
+\label{eq:closest}
+\end{equation}
+This minimizes Hamming distance from the target. Such alternatives tend to produce stronger cuts, although the optimization can be substantially more expensive for $9\times9$ Sudoku.
+
+\section{The essential endogenous-target Benders cut}
+
+Suppose the subproblem finds a valid alternative Sudoku $s$. If the target had been fixed in advance, we could simply require at least one clue in a cell where the target differs from $s$. Here, however, the master is allowed to change the target on its next solve. Therefore a cut tied permanently to the old target would not be globally valid.
+
+The correct cut is conditional.
+
+For every discovered complete Sudoku $s$, introduce a variable
+\[
+0\le \delta_s\le 1.
+\]
+Use the linking constraints
+\begin{equation}
+\delta_s + \target_{ij,s_{ij}} \ge 1
+\qquad \forall i,j.
+\label{eq:delta-link}
+\end{equation}
+
+If the current target equals $s$, then $y_{ij,s_{ij}}=1$ in every cell and $\delta_s$ may be zero. If the target differs from $s$ in even one cell, then the corresponding $y_{ij,s_{ij}}=0$, forcing $\delta_s=1$.
+
+Now add the cut
+\begin{equation}
+\sum_{i\in I}\sum_{j\in J}\sum_{\substack{k\in K\\k\ne s_{ij}}}
+\clue_{ijk}
+\ge \delta_s.
+\label{eq:benders-cut}
+\end{equation}
+
+\textbf{Plain-language meaning.} There are two possibilities:
+\begin{itemize}
+    \item If the master decides that $s$ itself will be the official answer key, the cut switches off because $\delta_s$ can be zero.
+    \item If the official answer key is anything other than $s$, then $\delta_s=1$, and at least one displayed clue must be a digit that $s$ does not contain in that cell. Therefore $s$ can no longer solve the displayed puzzle.
+\end{itemize}
+
+This is the key point when the target is endogenous: \emph{we do not globally ban a valid Sudoku $s$}. It is perfectly acceptable for $s$ to become the target. We ban $s$ only from being a second solution to a puzzle whose target is different.
+
+\section{Exactly how a non-unique incumbent is eliminated}
+
+Assume the current master proposes $(\bar x,\bar y)$ and the subproblem finds a second completion $s\neq\bar y$.
+
+Because $s$ satisfies all current clues, every currently selected clue agrees with $s$. Therefore, at the incumbent,
+\[
+\sum_{i,j}\sum_{k\ne s_{ij}} \bar x_{ijk}=0.
+\]
+At the same time, $\bar y\neq s$, so equation~\eqref{eq:delta-link} forces
+\[
+\delta_s=1.
+\]
+Hence the new cut requires
+\[
+0\ge 1,
+\]
+which is false. The current master solution is therefore cut off.
+
+On the next master solve, the optimizer has three conceptual choices:
+\begin{enumerate}
+    \item keep essentially the same target and add at least one clue that $s$ violates;
+    \item change the target to $s$, in which case $s$ is no longer an alternative and the cut can switch off; or
+    \item change to some other target, but still select at least one clue incompatible with $s$.
+\end{enumerate}
+
+The procedure repeats. Each successful subproblem contributes another valid complete Sudoku that the master must either adopt as its target or explicitly rule out with a clue.
+
+\section{Logic-based Benders algorithm}
+
+A textbook version of the algorithm is:
+
+\begin{enumerate}
+    \item Start with no Benders cuts.
+    \item Solve the restricted master:
+    \[
+    \min \sum_{ijk}x_{ijk}
+    \]
+    subject to the Sudoku constraints on $y$, the clue-link constraints, and all cuts generated so far.
+    \item Let $(\bar x,\bar y)$ be the master optimum.
+    \item Solve the uniqueness subproblem: find a Sudoku $z$ satisfying $\bar x$ with $z\neq\bar y$.
+    \item If the subproblem is infeasible, stop. The puzzle is unique.
+    \item Otherwise let $s$ be the alternative Sudoku found, add equations~\eqref{eq:delta-link} and~\eqref{eq:benders-cut}, and return to Step 2.
+\end{enumerate}
+
+Several alternatives can be generated before returning to the master. To do this, add a temporary no-good constraint for each alternative already found in the batch:
+\begin{equation}
+\sum_{i,j} z_{ij,s_{ij}}\le N^2-1.
+\end{equation}
+This produces a multi-cut implementation.
+
+\section{Why the final solution is not only unique but optimal}
+
+The restricted master contains only a subset of all uniqueness cuts, so its objective value is a lower bound on the true minimum number of clues.
+
+Suppose the restricted master returns a puzzle with $q$ clues and the uniqueness subproblem is infeasible. Then:
+\begin{itemize}
+    \item the current puzzle is feasible for the full problem because it has no second completion;
+    \item therefore the true optimum is at most $q$;
+    \item the restricted-master optimum is a lower bound, so the true optimum is at least $q$.
+\end{itemize}
+Consequently the true optimum equals $q$.
+
+This gives an exact optimality certificate, provided each restricted master is solved to optimality and the final uniqueness subproblem is proved infeasible.
+
+\section{A layman's analogy}
+
+The algorithm can be viewed as a repeated game between a \emph{puzzle designer} and a \emph{checker}.
+
+The designer writes an answer key and reveals as few numbers as possible. The checker then tries to ``cheat'' by finding a different completed Sudoku that still matches all visible clues.
+
+If the checker succeeds with a grid $s$, the designer receives a new rule:
+\begin{quote}
+Unless you decide that $s$ is your official answer key, you must reveal at least one clue that makes $s$ impossible.
+\end{quote}
+The designer then redesigns the puzzle under all accumulated rules. When the checker can no longer find a second completion, the current puzzle is unique.
+
+\section{Relationship to classical Benders decomposition}
+
+Classical Benders decomposition often starts from a problem of the form
+\begin{equation}
+\min_{x\in X}\; c^Tx + Q(x),
+\end{equation}
+where $x$ are master variables and $Q(x)$ is the value of a second-stage linear optimization problem. In two-stage stochastic programming,
+\begin{equation}
+Q(x)=\sum_{\omega\in\Omega}p_\omega Q_\omega(x),
+\end{equation}
+with one recourse problem for each random scenario $\omega$.
+
+When the recourse problem is linear, LP duality generates Benders cuts. A typical optimality cut has the form
+\[
+\theta_\omega \ge \alpha_\omega + \beta_\omega^T x,
+\]
+where the coefficients come from an optimal dual solution. Feasibility cuts may similarly come from dual extreme rays.
+
+The Sudoku decomposition is different in several important ways.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{p{0.28\textwidth}p{0.30\textwidth}p{0.32\textwidth}}
+\toprule
+ & \textbf{Classical stochastic Benders} & \textbf{Sudoku logic-based Benders}\\
+\midrule
+Meaning of subproblem & Evaluate recourse cost or feasibility after first-stage decisions & Search for a violating second Sudoku completion\\
+Uncertainty & Explicit random scenarios with probabilities & No randomness; alternatives are adversarial witnesses\\
+Subproblem type & Commonly LP recourse & Integer feasibility/MIP\\
+How cuts are obtained & LP dual solutions or rays & Logical implication from a discovered complete Sudoku\\
+Master auxiliary value & Often $\theta$ approximating recourse value & No recourse-value variable is needed\\
+Meaning of a cut & Improve approximation of $Q(x)$ or restore recourse feasibility & Require a clue that eliminates a known alternative unless it becomes the target\\
+Closest conceptual relatives & L-shaped method, stochastic programming & Logic-based Benders, separation, row generation, branch-and-cut\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Thus it is reasonable to call the method Benders decomposition because a master proposal is tested by a subordinate optimization problem and violations are returned as master cuts. More precisely, however, it is \textbf{logic-based Benders decomposition} or \textbf{constraint generation}, rather than the classical LP-duality Benders method.
+
+\section{Why simplex pivots are not a uniqueness test}
+\label{sec:simplex}
+
+An LP view can still provide intuition, but Sudoku uniqueness is an integer property. The LP relaxation can contain fractional points even when there is only one integer completion. Conversely, a unique optimum for an arbitrary LP objective does not imply that only one feasible integer Sudoku exists; another valid Sudoku may simply have a worse objective value.
+
+For that reason, ``no zero-cost pivot'' or ``unique LP basis'' is not the right certificate. The exact certificate is instead:
+\begin{quote}
+The integer subproblem searching for a distinct completion is infeasible.
+\end{quote}
+That statement is precisely the definition of uniqueness for the displayed clue set.
+
+\section{Symmetry breaking}
+
+When the target Sudoku is generated by the master, many mathematically equivalent answer keys exist because the digits can be relabelled. A safe symmetry-breaking condition is
+\begin{equation}
+\target_{1,j,j}=1
+\qquad j=1,\ldots,N,
+\end{equation}
+which fixes the first row to $1,2,\ldots,N$.
+
+This does not remove any essential puzzle structure: any valid Sudoku has all digits exactly once in its first row, so its symbols can be relabelled to obtain this canonical form. Symmetry breaking is much more important in the endogenous-target version than in the fixed-target version because the optimizer otherwise explores many equivalent answer keys.
+
+\subsection{Ordering rows and bands}
+
+Digit relabelling is only one part of the Sudoku symmetry group. Permuting the rows inside a band, or permuting whole bands, maps a valid grid to a valid grid and a unique puzzle to a unique puzzle with the same number of clues. Permutations that keep row~1 in place also keep the first row equal to $1,\ldots,N$, so they can be combined with the constraint above. Write
+\[
+v_i=\sum_{k\in K}k\,\target_{i1k}
+\]
+for the digit in column~1 of row~$i$, and let $b=\sqrt N$. For consecutive rows $i<i'$ of the same band, both different from row~1,
+\begin{equation}
+v_i+1\le v_{i'},
+\label{eq:row-order}
+\end{equation}
+and for the first rows of consecutive bands $2,\ldots,b$,
+\begin{equation}
+v_{(\beta-1)b+1}+1\le v_{\beta b+1}
+\qquad \beta=2,\ldots,b-1.
+\label{eq:band-order}
+\end{equation}
+Any grid can be brought into this form by first sorting the rows inside each band and then sorting bands $2,\ldots,b$, so no equivalence class is lost. The full symmetry group is much larger ($3{,}359{,}232$ grid transformations times $9!$ relabellings for $9\times9$, leaving about $5.47\times10^9$ essentially different grids~\cite{jarvis}).
+
+\subsection{Splitting by the top band}
+
+A stronger reduction fixes the whole top band. Two bands are called equivalent if one can be turned into the other by permuting stacks, permuting columns inside stacks, permuting the band's three rows and relabelling digits. All of these operations are Sudoku symmetries, and permuting bands can move any band of a grid to the top. Hence every grid is equivalent to a grid whose top band is one representative $T$ of its band class.
+
+The script \texttt{make\_top\_bands.py} enumerates all $2{,}612{,}736$ bands whose first box is $1,\ldots,9$ in reading order and splits them into orbits under the operations above. It finds $416$ classes, in agreement with the literature~\cite{mcguire}; for $4\times4$ there are $2$. For class representative $T$,
+\begin{equation}
+\target_{ijk}=[\,T_{ij}=k\,]\qquad i=1,\ldots,b,\ j\in J,\ k\in K,
+\label{eq:top-band}
+\end{equation}
+which replaces the first-row constraint. Rows inside bands $2,\ldots,b$ and the order of those bands can still be normalised with~\eqref{eq:row-order}--\eqref{eq:band-order}. The minimum clue count over all grids is the minimum over the $416$ class models, so a lower bound for the whole problem is the smallest lower bound over the classes.
+
+\section{Stronger Benders cuts from unavoidable sets}
+
+In Sudoku terminology, a set $U$ of cells of a completed grid $G$ is \emph{unavoidable} if the entries of $U$ can be rearranged to give a different valid grid~\cite{mcguire}. Every unique puzzle for $G$ must contain a clue in every unavoidable set, and conversely a clue set that hits every unavoidable set determines $G$ uniquely.
+
+Each alternative $s$ found by the subproblem yields such a set for the current target $\bar y$:
+\[
+D=\{(i,j): s_{ij}\ne\bar k_{ij}\}.
+\]
+Inside each row, column and box, $\bar y$ and $s$ agree outside $D$, so the digits of $\bar y$ on $D$ are a rearrangement of the digits of $s$ on $D$. Consequently \emph{any} valid grid that agrees with $\bar y$ on $D$ stays valid when its entries on $D$ are replaced by those of $s$. This gives a cut that is valid for every target, not only for $\bar y$:
+\begin{equation}
+\sum_{(i,j)\in D}\bigl(\clue_{ij\bar k_{ij}}-\target_{ij\bar k_{ij}}\bigr)\ge 1-|D|.
+\label{eq:unavoidable-cut}
+\end{equation}
+
+\textbf{Plain-language meaning.} If the answer key has the same digits as $\bar y$ on the cells $D$, then at least one of those cells must be shown as a clue; otherwise the digits on $D$ could be swapped to those of $s$. If the target differs from $\bar y$ somewhere on $D$, the left-hand side is at least $-|D|+1$ and the cut is inactive.
+
+At the incumbent all $|D|$ target terms equal one and no clue lies in $D$, so the left-hand side is $-|D|$ and the incumbent is cut off. Compared with~\eqref{eq:benders-cut}, the cut needs no auxiliary variable and has only $2|D|$ nonzeros. It also applies to every target that shares the pattern on $D$, not only to targets different from $s$. Small sets $D$ give the strongest cuts, which is a further argument for the closest-alternative objective~\eqref{eq:closest}.
+
+\section{Valid inequalities independent of the target}
+
+The following inequalities hold for every unique puzzle of every grid, so they can be added to the master before the first solve.
+
+\subsection{At least $N-1$ digits appear among the clues}
+
+If two digits $a\ne b$ both have no clue, exchanging $a$ and $b$ everywhere in the target gives a different valid grid that agrees with all clues. Hence at most one digit may be missing~\cite{mcguire}. With binary $u_k$,
+\begin{equation}
+u_k\le\sum_{i,j}\clue_{ijk}\quad\forall k,
+\qquad
+\sum_{k\in K}u_k\ge N-1.
+\label{eq:digit-cover}
+\end{equation}
+Since $\sum_{ijk}\clue_{ijk}\ge\sum_k u_k$, the LP bound of the master immediately rises to $N-1$, i.e.\ $8$ for $9\times9$, instead of $0$.
+
+\subsection{No two empty rows in a band}
+
+Two rows of the same band can be exchanged without violating any Sudoku constraint. If both rows contain no clue, the exchanged grid agrees with every clue and differs from the target. Therefore
+\begin{equation}
+\sum_{j,k}\bigl(\clue_{ijk}+\clue_{i'jk}\bigr)\ge1
+\qquad\text{for rows } i<i' \text{ in the same band},
+\label{eq:row-pairs}
+\end{equation}
+and the same for two columns of the same stack.
+
+\subsection{Rectangles: unavoidable sets of four cells}
+
+Let rows $i<i'$ and columns $j<j'$ be such that the rows share a band or the columns share a stack, and let $a\ne b$ be digits. If the target has $a,b$ in $(i,j),(i,j')$ and $b,a$ in $(i',j),(i',j')$, exchanging $a$ and $b$ in these four cells gives another valid grid: every row and column still contains $a$ and $b$ once, and each affected box loses and gains the same digit. With $R=\{(i,j,a),(i,j',b),(i',j,b),(i',j',a)\}$,
+\begin{equation}
+\sum_{(p,q,k)\in R}\clue_{pqk}\ \ge\ \sum_{(p,q,k)\in R}\target_{pqk}-3.
+\label{eq:rectangles}
+\end{equation}
+For $9\times9$ there are $40{,}824$ such inequalities with eight nonzeros each. They are best placed in the solver's lazy-constraint pool, so they only enter the LP when violated.
+
+\section{Faster restricted-master solves}
+\label{sec:master-speed}
+
+In the iterative algorithm each master is solved from scratch to proven optimality, and late in the run these solves dominate the time. Three simple measures help, none of which changes the result.
+\begin{enumerate}
+    \item \textbf{A lower-bound row.} Let $L$ be the optimal value of the last restricted master. Later masters only have more cuts, so their optimum is at least $L$, and the row
+    \[
+    \sum_{ijk}\clue_{ijk}\ge L
+    \]
+    is valid. With it the solver can stop as soon as it finds a solution with $L$ clues instead of proving the bound again.
+    \item \textbf{A repaired start.} The previous master solution violates the new cuts, but it becomes feasible again after adding a clue, at the target value, in each set $D$ that it does not yet hit. Adding clues never violates an earlier cut or any of the inequalities of the previous section, so the result is a valid MIP start. Cells are chosen greedily to hit as many sets at once as possible.
+    \item \textbf{Dropping dominated cuts.} Write the cut~\eqref{eq:unavoidable-cut} with the key $\{(i,j,\bar k_{ij}):(i,j)\in D\}$. If one key is contained in another, the cut with the smaller key implies the other, also for the LP relaxation, so the larger one is not added or is removed.
+\end{enumerate}
+
+In practice none of the three paid off. On the fixed $9\times9$ grid of~\cite{mcguire} with Gurobi~14 (300\,s per run), the time to reach the bound $16$ was $53$\,s without them, $58$\,s with the start, $59$\,s with the pruning, $80$\,s with the lower-bound row and $110$\,s with all three. The lower-bound row is the clearest loss: an explicit bound on the objective makes the LP relaxation highly degenerate. The implementation therefore keeps them only as options, switched off by default.
+
+\section{An assumed minimum and a positional tie-breaker}
+
+\subsection{At least 17 clues}
+
+The computation of~\cite{mcguire} shows that every $9\times9$ Sudoku with a unique completion has at least $17$ clues. Taking this as known,
+\begin{equation}
+\sum_{ijk}\clue_{ijk}\ge 17
+\label{eq:min-clues}
+\end{equation}
+may be added to the master. The objective still minimises the number of clues, so if no unique $17$-clue puzzle is found within the time limit, the best unique puzzle found so far, possibly with more clues, is reported. The constraint removes the work of raising the lower bound from $8$ to $17$, but not the search for a grid that actually admits a $17$-clue puzzle, and such grids are rare~\cite{mcguire}. Unlike the inequalities of the previous sections, \eqref{eq:min-clues} is not proved by the model; the reported lower bound then rests on that result.
+
+\subsection{Preferring clues towards the top-left}
+
+Many puzzles have the same minimum number of clues. A secondary preference for clues near the top-left corner, with weight $2+i+j$ for cell $(i,j)$ counted from zero, can be combined with the clue count lexicographically:
+\begin{equation}
+\min\ \sum_{ijk}\bigl(W+2+i+j\bigr)\,\clue_{ijk},
+\qquad W=2N^3+1.
+\label{eq:position-weights}
+\end{equation}
+At most one clue lies in each cell and each weight is below $2N$, so the secondary part is always smaller than $W$. Therefore the clue count is minimised first and the positional weights only choose among puzzles with the same count, and $\lfloor z/W\rfloor$ of any objective bound $z$ is a lower bound on the clue count. This selects a single preferred puzzle among equivalent ones, but it does not remove symmetric solutions from the feasible set as the symmetry-breaking constraints do. Weighting the digit $k$ as well would add nothing, because the digit relabelling is already fixed by the first-row or top-band constraints.
+
+\section{Controlling the spread of the clues}
+\label{sec:spread}
+
+Following Ate\c{s} and \c{C}avdur~\cite{ates}, the number of clues in each row, column and box, and the number of times each digit is shown, can be bounded. In our variables these are linear:
+\begin{align}
+\ell_R\le\sum_{j,k}\clue_{ijk}&\le u_R\quad\forall i, &
+\ell_C\le\sum_{i,k}\clue_{ijk}&\le u_C\quad\forall j, \label{eq:spread}\\
+\ell_B\le\sum_{(i,j)\in B}\sum_k\clue_{ijk}&\le u_B\quad\forall B\in\mathcal B, &
+\ell_K\le\sum_{i,j}\clue_{ijk}&\le u_K\quad\forall k. \notag
+\end{align}
+In~\cite{ates} the digit bound needs a product of a grid variable and a ``shown'' variable, which is then linearised; here $\clue_{ijk}$ already records both the cell and the digit of a clue, so no extra variables are needed.
+
+Unlike the inequalities of Section~\ref{sec:master-speed} and before, \eqref{eq:spread} are \emph{requirements}: they exclude puzzles that are unique but unbalanced, so the optimum becomes the fewest clues among balanced unique puzzles. Because the same bounds apply to every row, column, box and digit, they are unchanged by all the symmetries used above, and the symmetry-breaking constraints remain valid. If the bounds admit no unique puzzle, the master eventually becomes infeasible, which the implementation reports as such. The inequality~\eqref{eq:digit-cover} is the special case $\ell_K=1$ for all but one digit.
+
+\section{Fixed-target variant}
+
+If the target grid is given, only the clue variables remain and the problem becomes the minimum-clue problem for one grid, as in the bilevel formulation of~\cite{bilevel}. The conditional cut~\eqref{eq:benders-cut} then coincides with the unavoidable-set cut~\eqref{eq:unavoidable-cut}, and symmetry breaking must be switched off because it would contradict the given grid. The 17-clue puzzle of~\cite{mcguire} gives a grid whose optimum is known to be exactly $17$, which makes a useful $9\times9$ benchmark.
+
+\section{The $4\times4$ test problem}
+
+The implementation included with this note solves a $4\times4$ instance using SciPy's \texttt{milp} interface, whose MIP backend is HiGHS. One run generates the target
+\[
+\begin{bmatrix}
+1&2&3&4\\
+4&3&2&1\\
+3&1&4&2\\
+2&4&1&3
+\end{bmatrix}
+\]
+and the four-clue puzzle
+\[
+\begin{bmatrix}
+1&2&\cdot&\cdot\\
+\cdot&\cdot&\cdot&\cdot\\
+\cdot&\cdot&4&\cdot\\
+2&\cdot&\cdot&\cdot
+\end{bmatrix}.
+\]
+The final subproblem is infeasible, proving that this displayed puzzle has no second completion. Because the restricted master objective is four at that point, the same calculation also proves that four clues are optimal for the model under the stated symmetry normalization.
+
+\section{Command-line and Colab use}
+
+The command-line implementation can be run as
+\begin{verbatim}
+python sudoku_benders_generator.py --size 4
+\end{verbatim}
+For a $9\times9$ run, a practical starting point is
+\begin{verbatim}
+python sudoku_benders_generator.py --size 9 \
+    --separator feasible --batch-size 4 \
+    --max-master-solves 500
+\end{verbatim}
+The \texttt{closest} separator generally gives stronger cuts but can be considerably more expensive on $9\times9$. The \texttt{feasible} separator asks HiGHS only to find some second completion.
+
+The Colab notebook contains the same model but exposes the settings as ordinary Python variables rather than command-line arguments.
+
+\subsection*{Gurobi version}
+
+\texttt{sudoku\_benders\_gurobi.py} implements the same model with \texttt{gurobipy}, together with the extensions of the previous sections. It offers two solution modes. In \texttt{callback} mode a single branch-and-cut run separates every incumbent in a \texttt{MIPSOL} callback and adds the cuts as lazy constraints. In \texttt{iterative} mode a persistent master is re-optimised after each round of cuts, as in the algorithm above. The main options are:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Option & Meaning\\
+\midrule
+\texttt{--cut delta|unavoidable|both} & \eqref{eq:delta-link}--\eqref{eq:benders-cut}, \eqref{eq:unavoidable-cut}, or both\\
+\texttt{--digit-cover} & inequalities \eqref{eq:digit-cover}\\
+\texttt{--line-pairs} & inequalities \eqref{eq:row-pairs} for rows and columns\\
+\texttt{--rectangles lazy|model} & inequalities \eqref{eq:rectangles}\\
+\texttt{--strengthen} & all three of the above (rectangles lazy)\\
+\texttt{--row-symmetry} & ordering constraints \eqref{eq:row-order}--\eqref{eq:band-order}\\
+\texttt{--fixed-grid GRID} & fixed-target variant, e.g.\ \texttt{mcguire17}\\
+\texttt{--top-band I|I-J|all} & fix the top band~\eqref{eq:top-band}, one model per class\\
+\texttt{--speedups LIST} & measures of Section~\ref{sec:master-speed}: \texttt{bound,start,prune} or \texttt{none}\\
+\texttt{--min-clues M} & assumed minimum~\eqref{eq:min-clues}, e.g.\ $17$\\
+\texttt{--position-weights} & positional tie-breaker~\eqref{eq:position-weights}\\
+\texttt{--row-clues}, \texttt{--col-clues}, & bounds~\eqref{eq:spread} as \texttt{MIN:MAX}, \texttt{MIN:}, \texttt{:MAX}\\
+\texttt{--box-clues}, \texttt{--digit-clues} & or an exact number\\
+\bottomrule
+\end{tabular}
+\end{center}
+For example:
+\begin{verbatim}
+python sudoku_benders_gurobi.py --size 9 --fixed-grid mcguire17 \
+    --mode iterative --strengthen --cut unavoidable \
+    --separator closest --batch-size 20 --max-master-solves 100000
+\end{verbatim}
+Every returned puzzle is re-checked for uniqueness at the end, and a result that fails the check is never reported as optimal.
+
+\section{Computational comments for $9\times9$}
+
+The mathematical formulation does not change when moving from $4\times4$ to $9\times9$, but the computational problem changes dramatically. The master is simultaneously searching over possible target grids and clue sets, while each Benders iteration solves another integer Sudoku search problem. A complete proof of minimum clue count can therefore require many cuts and many master re-solves.
+
+For larger instances, useful enhancements include stronger symmetry breaking, multi-cut separation, cut-pool management, warm-start clue sets, and a hybrid separator that normally seeks any feasible alternative but periodically searches for a closest alternative. These are performance improvements; they do not change the logic of the uniqueness certificate.
+
+\section{Related work}
+
+\paragraph{Integer programming for Sudoku.} Solving Sudoku as a binary program with the four assignment constraint families is a classical teaching example~\cite{chlond,koch,bartlett}. Bartlett et al.~\cite{bartlett} also derive new puzzles from a given one through the symmetry operations of Section~\ref{app:mcguire}, and Williams~\cite{williams} certifies uniqueness with a second integer program, which is our subproblem without the cut-generation loop.
+
+\paragraph{Generating Sudoku puzzles with a MIP.} The closest work is that of Ate\c{s} and \c{C}avdur~\cite{ates}. Like our master, their model chooses both the solution grid and the shown entries and minimises the number of shown entries, and they note that earlier studies had not combined both phases in one mathematical program. Their main addition is the control of the spread of clues and digit frequencies, adopted in Section~\ref{sec:spread}. Their model does \emph{not} enforce uniqueness; the authors state this as a limitation and list it as future work. Uniqueness is instead obtained outside the model, either by re-solving until an enumeration finds no second completion, or, in their game application, by a backtracking procedure that builds a random grid and removes entries while the solution stays unique. Their model also discusses reduced costs of the LP relaxation in connection with alternative solutions; as argued in Section~\ref{sec:simplex}, such tests do not certify integer uniqueness. The present note adds the missing piece: uniqueness is enforced inside the optimisation through logic-based Benders cuts, which also yields lower bounds on the number of clues.
+
+\paragraph{The minimum number of clues.} McGuire, Tugemann and Civario~\cite{mcguire} proved by exhaustive hitting-set enumeration over all essentially different grids~\cite{russelljarvis} that 17 clues are necessary (Appendix~\ref{app:mcguire}); Lin and Wu~\cite{linwu} described a related search. Tjusila, Besan\c{c}on, Turner and Koch~\cite{bilevel} formulate the minimum-clue problem for a \emph{fixed} grid as a binary bilevel program strengthened by unavoidable-set inequalities, and solve 95\% of 50 test grids. Our fixed-target variant addresses the same problem by Benders decomposition, while the endogenous-target model also chooses the grid.
+
+\paragraph{Other puzzles.} Mixed-integer models that generate as well as solve puzzles exist for Smashed Sums~\cite{kececi} and the Survo puzzle~\cite{sungur}, and Hartmann~\cite{hartmann18,hartmann19} solves several smartphone puzzles by mathematical programming. For Evolomino, Nikolaev and Myasnikov~\cite{nikolaev} build a random solution and then remove clues in random order, keeping a removal only if the ILP with a no-good constraint excluding the known solution becomes infeasible; the result is minimal (no clue can be removed) but not necessarily minimum. The same no-good test is used to check uniqueness of KenKen solutions~\cite{kalvelagen}. In constraint programming, Simonis~\cite{simonis} models Kakuro, compares MILP and SAT solvers and tightens puzzles by removing hints, and Jefferson, Moncur and Petrie~\cite{jefferson} generate, check and grade all levels of a commercial puzzle game with constraint models.
+
+\paragraph{Summary of the difference.} Published generators either ignore uniqueness in the optimisation model~\cite{ates} or use the solver only as a uniqueness oracle inside a greedy removal loop~\cite{nikolaev,simonis}. The latter is fast but gives no guarantee on the number of clues. Our decomposition optimises over grids and clue sets jointly with uniqueness enforced by cuts, at a much higher computational cost; a greedy removal pass would be a natural way to provide it with good starting solutions.
+
+\section{Summary}
+
+The full method can be summarized in one sentence:
+\begin{quote}
+Generate a Sudoku and a small set of its entries, then repeatedly ask an integer subproblem to find another completion; every successful alternative becomes a conditional master cut requiring a clue that rules it out unless that alternative becomes the new target.
+\end{quote}
+
+The central cut is
+\[
+\delta_s+ y_{ij,s_{ij}}\ge1\quad\forall i,j,
+\qquad
+\sum_{i,j,k\ne s_{ij}}x_{ijk}\ge\delta_s.
+\]
+It is this conditional structure that makes the decomposition valid when the target Sudoku is itself generated by the MIP.
+
+\appendix
+
+\section{McGuire's proof in plain language}
+\label{app:mcguire}
+
+This appendix summarises, without technical detail, how McGuire, Tugemann and Civario~\cite{mcguire} settled the minimum-clue question, and how their approach relates to the model in this note.
+
+\subsection*{The question}
+
+A newspaper Sudoku usually shows about 25 clues. Puzzles with 17 clues were known, but nobody had ever found one with 16. The question was whether a 16-clue puzzle with exactly one solution exists. If none exists, 17 is the minimum.
+
+\subsection*{Not an optimisation model}
+
+The proof did not use mixed-integer programming or any general-purpose solver. The authors wrote a specialised program, called \emph{checker}, in C++ with its innermost routines in assembly language. It answers one yes/no question for one completed grid: is there a set of 16 of its entries that determines the grid uniquely? They then ran it on every essentially different completed grid. So instead of asking ``what is the fewest clues?'' for all grids at once, as our master problem does, they asked ``are 16 enough?'' for each grid separately.
+
+\subsection*{Step 1: a catalogue of all grids}
+
+There are about $6.7\times10^{21}$ completed Sudoku grids, far too many to check. But relabelling the digits, swapping bands or stacks, reordering rows inside a band or columns inside a stack, and transposing (reflecting) the grid all turn one grid into an equivalent one. If one grid has a 16-clue puzzle, so do all its equivalent grids. Earlier work by Russell and Jarvis had shown that there are $5{,}472{,}730{,}538$ essentially different grids. A program by Glenn Fowler listed one representative of each, compressed to under 6~GB, so that the whole catalogue fitted on a single DVD.
+
+\subsection*{Step 2: unavoidable sets}
+
+In a completed grid, some groups of cells can be rearranged to give a different valid grid. The simplest example is a ``rectangle'' of four cells holding two digits, say
+\[
+\begin{matrix} 5 & 9\\ 9 & 5 \end{matrix}
+\]
+in two rows and two columns arranged so that swapping the 5s and 9s breaks no rule. If a puzzle shows none of these four cells, the solver cannot tell the two versions apart. So every valid puzzle must reveal at least one cell of every such group. The authors call these groups \emph{unavoidable sets}; in the study of Latin squares they are known as \emph{trades}. Our cuts~\eqref{eq:unavoidable-cut} and~\eqref{eq:rectangles} are exactly this idea.
+
+For each grid, \emph{checker} looked up a list of 525 known patterns (``blueprints'', compiled by Ed Russell) of up to twelve cells and matched them against the grid. A typical grid has about 360 unavoidable sets of this size, which took under a twentieth of a second to find.
+
+\subsection*{Step 3: choosing clues that hit every set}
+
+A candidate puzzle must contain a cell from every unavoidable set. Choosing 16 cells that together touch all the sets is the classical \emph{hitting set} problem. Instead of trying all $\binom{81}{16}\approx3.4\times10^{16}$ choices of 16 cells, \emph{checker} built candidates one clue at a time. It always took the next clue from an unavoidable set that no clue had touched yet. That set must be hit anyway, so only its cells need to be tried.
+
+The decisive speed-up was early abandonment. If several unavoidable sets share no cells, each needs its own clue. For example, if after 13 clues there are still four untouched and mutually disjoint sets, three more clues cannot possibly be enough, and that branch of the search can be dropped immediately. The authors call such groups of disjoint sets ``cliques''. They report that this simple observation was what made the project feasible. A second trick, a ``dead clue'' list, ensured that no candidate was generated twice.
+
+\subsection*{Step 4: testing each candidate}
+
+A set of 16 clues that hits all the listed unavoidable sets is only a candidate, because the list contains only the sets of up to twelve cells. Each candidate was therefore given to a fast conventional Sudoku solver (a stripped-down version of Brian Turner's \emph{BBSudoku}), which checked more than 50{,}000 puzzles per second for a second solution. No candidate ever had exactly one solution.
+
+\subsection*{The computation}
+
+Step~3 used about 95\% of the running time. The search ran from January to December 2011 on the \emph{Stokes} cluster of the Irish Centre for High-End Computing and took about 7.1 million core hours, with an average of 3.6 seconds per grid. The authors announced on 1~January 2012 that no 16-clue Sudoku exists, so the minimum is 17.
+
+To check that \emph{checker} was correct, they also ran a version that searched for 17-clue puzzles on all grids already known to contain them. It found every known 17-clue puzzle on those grids. They also verified each unavoidable set found and each solver answer a second time.
+
+\subsection*{Where the 17-clue puzzles came from}
+
+The 17-clue puzzle quoted in the paper, which our \texttt{mcguire17} grid is based on, was not found by this computation. Seventeen-clue puzzles had been collected for years before, mostly by Gordon Royle while searching for a 16-clue puzzle, with contributions from the online Sudoku community. His list had grown to 49{,}151 puzzles. Contributors rarely sent in new puzzles by then, which suggested the list was nearly complete. One grid holds the record with 29 different 17-clue puzzles, all found by Royle; the authors later searched this grid completely and confirmed that there are exactly 29. So the existence of 17-clue puzzles was known from examples, and the contribution of~\cite{mcguire} was to prove that 16 is never enough.
+
+\subsection*{What this means for our model}
+
+Both approaches rest on unavoidable sets, but they use them differently:
+\begin{itemize}
+    \item \emph{checker} works on one fixed grid at a time, as in our fixed-target variant. It finds its unavoidable sets in advance from the blueprint list, whereas our subproblem discovers them one by one as it finds alternative solutions.
+    \item \emph{checker} enumerates clue sets with a highly tuned search that stops a branch as soon as the untouched disjoint sets show it cannot succeed. Our master leaves that reasoning to a general MIP solver working from the LP relaxation.
+    \item Symmetry is handled completely by the catalogue of $5.47\times10^9$ representatives. Our model breaks only part of the symmetry, through the first row or the top-band classes.
+\end{itemize}
+The comparison also shows the scale: \emph{checker} needed 3.6 seconds on average to decide whether one grid has a 16-clue puzzle, while our fixed-grid run needed about 11 minutes to raise the lower bound to 17 for a single grid.
+
+\begin{thebibliography}{99}
+\bibitem{ates} T.~Ate\c{s}, F.~\c{C}avdur. Sudoku puzzle generation using mathematical programming and heuristics: puzzle construction and game development. \emph{Expert Systems with Applications} 282 (2025) 127710. doi:10.1016/j.eswa.2025.127710.
+\bibitem{bartlett} A.~C.~Bartlett, T.~P.~Chartier, A.~N.~Langville, T.~D.~Rankin. An integer programming model for the Sudoku problem. \emph{Journal of Online Mathematics and its Applications} 8(1), 2008.
+\bibitem{bilevel} G.~Tjusila, M.~Besan\c{c}on, M.~Turner, T.~Koch. How many clues to give? A bilevel formulation for the minimum Sudoku clue problem. \emph{Operations Research Letters}, 2024. arXiv:2305.01697.
+\bibitem{chlond} M.~J.~Chlond. Classroom exercises in IP modeling: Su Doku and the log pile. \emph{INFORMS Transactions on Education} 5(2) (2005) 77--79.
+\bibitem{hartmann18} S.~Hartmann. Puzzle-solving smartphone puzzle apps by mathematical programming. \emph{INFORMS Transactions on Education} 18(2) (2018) 127--141.
+\bibitem{hartmann19} S.~Hartmann. Puzzle---more logic puzzle apps solved by mathematical programming. \emph{INFORMS Transactions on Education} 20(1) (2019) 49--55.
+\bibitem{jarvis} A.~F.~Jarvis. Sudoku enumeration: the symmetry group. \url{http://www.afjarvis.org.uk/sudoku/sudgroup.html}.
+\bibitem{jefferson} C.~Jefferson, W.~Moncur, K.~E.~Petrie. Combination: automated generation of puzzles with constraints. In \emph{Proceedings of the ACM Symposium on Applied Computing (SAC~'11)}, 2011, 907--912.
+\bibitem{kalvelagen} E.~Kalvelagen. Unique solutions in KenKen. \emph{Yet Another Math Programming Consultant} (blog), December 2016. \url{http://yetanothermathprogrammingconsultant.blogspot.com/2016/12/unique-solutions-in-kenken.html}.
+\bibitem{kececi} B.~Ke\c{c}eci. A mixed integer programming formulation for Smashed Sums puzzle: generating and solving problem instances. \emph{Entertainment Computing} 36 (2021) 100386.
+\bibitem{koch} T.~Koch. Rapid mathematical programming or how to solve Sudoku puzzles in a few seconds. In \emph{Operations Research Proceedings 2005}, Springer, 2006, 21--26.
+\bibitem{linwu} H.-H.~Lin, I-C.~Wu. An efficient approach to solving the minimum Sudoku problem. \emph{ICGA Journal} 34(4) (2011) 191--208.
+\bibitem{mcguire} G.~McGuire, B.~Tugemann, G.~Civario. There is no 16-clue Sudoku: solving the Sudoku minimum number of clues problem via hitting set enumeration. \emph{Experimental Mathematics} 23(2) (2014) 190--217. arXiv:1201.0749.
+\bibitem{nikolaev} A.~V.~Nikolaev, Y.~A.~Myasnikov. An integer linear programming model for the Evolomino puzzle. arXiv:2603.09483, 2026.
+\bibitem{russelljarvis} E.~Russell, F.~Jarvis. Mathematics of Sudoku II. \emph{Mathematical Spectrum} 39(2) (2006) 54--58.
+\bibitem{simonis} H.~Simonis. Kakuro as a constraint problem. In \emph{Proceedings of the ModRef Workshop at CP}, 2008.
+\bibitem{sungur} B.~Sungur, F.~S.~Madeno\u{g}lu. An integer programming formulation for generating and solving Survo puzzle. \emph{Erciyes University Journal of Faculty of Economics and Administrative Sciences}, 2025.
+\bibitem{williams} A.~Williams. When natural variables are not enough: teaching integer programming with Sudoku. arXiv:2606.30227, 2026.
+\end{thebibliography}
+
+\end{document}
